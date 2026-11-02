@@ -41,6 +41,11 @@ function StreamHealthApp() {
   // Selected option for current scenario by streamer or local fallback
   const [localSelectedOption, setLocalSelectedOption] = useState<'A' | 'B' | 'C' | null>(null);
 
+  // Reset selected option when switching scenarios
+  useEffect(() => {
+    setLocalSelectedOption(null);
+  }, [currentScenarioIndex]);
+
   // Overlay mode state: check URL param ?overlay=1 or user toggle
   const [isOverlayMode, setIsOverlayMode] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -214,11 +219,17 @@ function StreamHealthApp() {
     );
   }
 
-  // Option labels for audience poll bar
+  // Option labels for audience poll bar (hide outcome effects until voting is closed to avoid spoiling)
   const optionLabels: { 1: string; 2: string; 3: string } = {
-    1: `[${currentScenario.options[0]?.infectionEffectLabel}] ${currentScenario.options[0]?.text || 'Option 1'}`,
-    2: `[${currentScenario.options[1]?.infectionEffectLabel}] ${currentScenario.options[1]?.text || 'Option 2'}`,
-    3: `[${currentScenario.options[2]?.infectionEffectLabel}] ${currentScenario.options[2]?.text || 'Option 3'}`,
+    1: isCurrentVotingClosed
+      ? `[${currentScenario.options[0]?.infectionEffectLabel}] ${currentScenario.options[0]?.text || 'Option 1'}`
+      : (currentScenario.options[0]?.text || 'Option 1'),
+    2: isCurrentVotingClosed
+      ? `[${currentScenario.options[1]?.infectionEffectLabel}] ${currentScenario.options[1]?.text || 'Option 2'}`
+      : (currentScenario.options[1]?.text || 'Option 2'),
+    3: isCurrentVotingClosed
+      ? `[${currentScenario.options[2]?.infectionEffectLabel}] ${currentScenario.options[2]?.text || 'Option 3'}`
+      : (currentScenario.options[2]?.text || 'Option 3'),
   };
 
   const isCompleted = engineState.phase === 'completed';

@@ -388,6 +388,18 @@ app.post('/api/ai-explain', handleExplain);
 async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production' || !!process.env.RENDER;
 
+  // If dist/index.html is missing on startup, attempt an automatic build
+  if (!fs.existsSync(distIndex)) {
+    try {
+      console.log('[Server] dist/index.html not found on startup. Triggering build...');
+      const { build: viteBuild } = await import('vite');
+      await viteBuild();
+      console.log('[Server] Automatic build completed successfully.');
+    } catch (buildErr) {
+      console.warn('[Server] Automatic build attempt failed:', buildErr);
+    }
+  }
+
   if (!isProduction && !fs.existsSync(distIndex)) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

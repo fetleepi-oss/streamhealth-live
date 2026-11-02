@@ -38,6 +38,27 @@ export const EpidemicCurveCanvas: React.FC<EpidemicCurveCanvasProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [hoveredPoint, setHoveredPoint] = useState<DataPoint | null>(null);
   const [animationProgress, setAnimationProgress] = useState(0);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+
+  // Re-render canvas sharply when container dimensions change (resize, orientation, fullscreen)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+          setDimensions({
+            width: Math.round(entry.contentRect.width),
+            height: Math.round(entry.contentRect.height),
+          });
+        }
+      }
+    });
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Trigger smooth bend animation when voting closes or winning option changes
   useEffect(() => {
@@ -424,7 +445,7 @@ export const EpidemicCurveCanvas: React.FC<EpidemicCurveCanvasProps> = ({
     ctx.font = 'bold 11px "JetBrains Mono", monospace';
     ctx.textAlign = 'left';
     ctx.fillText(`${lastVisible.cases} cases`, headX + 12, headY - 2);
-  }, [curvePoints, currentScenarioIndex, isVotingClosedForCurrent, currentWinningOption, animationProgress]);
+  }, [curvePoints, currentScenarioIndex, isVotingClosedForCurrent, currentWinningOption, animationProgress, dimensions]);
 
   // Handle canvas mouse move for interactive inspection
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
