@@ -1,0 +1,32 @@
+:root {
+  --bg-canvas: #0b1020;
+  --bg-card: #121a30;
+  --bg-card-subtle: #17223d;
+  --border-card: #1e294b;
+  --border-highlight: #2e3e6b;
+
+  --teal-primary: #2dd4bf;
+  --teal-glow: rgba(45, 212, 191, 0.25);
+
+  --amber-warning: #f59e0b;
+  --amber-glow: rgba(245, 158, 11, 0.25);
+
+  --coral-danger: #fb7185;
+  --coral-glow: rgba(251, 113, 133, 0.25);
+
+  --violet-accent: #8b5cf6;
+  --violet-glow: rgba(139, 92, 246, 0.25);
+
+  --twitch-purple: #9146ff;
+  --twitch-purple-glow: rgba(145, 70, 255, 0.3);
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

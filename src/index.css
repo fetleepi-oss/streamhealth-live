@@ -1,0 +1,36 @@
+@import "tailwindcss";
+@import "./styles/theme.css";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg-canvas);
+    color: #f1f5f9;
+    overflow-x: hidden;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Custom glow helpers */
+.glow-teal {
+  box-shadow: 0 0 20px -3px var(--teal-glow);
+}
+
+.glow-amber {
+  box-shadow: 0 0 20px -3px var(--amber-glow);
+}
+
+.glow-coral {
+  box-shadow: 0 0 20px -3px var(--coral-glow);
+}
+
+.glow-violet {
+  box-shadow: 0 0 20px -3px var(--violet-glow);
+}
+
+.glow-twitch {
+  box-shadow: 0 0 20px -3px var(--twitch-purple-glow);
+}
