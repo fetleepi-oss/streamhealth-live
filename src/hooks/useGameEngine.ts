@@ -412,7 +412,7 @@ export function useGameEngine() {
     const timeoutId = setTimeout(() => controller.abort(), 4000); // 4-second strict timeout
 
     try {
-      const response = await fetch('/api/ai-explain', {
+      const response = await fetch('/api/explain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,

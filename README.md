@@ -122,6 +122,29 @@ Testing offline or without an active Twitch chat?
 
 ---
 
+## 🚀 Render Deployment Guide
+
+Deploying StreamHealth Live to [Render](https://render.com):
+
+1. **Service Type**: Web Service (Node / Bun environment)
+2. **Build Command**:
+   ```bash
+   bun install && bun run build
+   ```
+   *(or `npm install && npm run build`)*
+3. **Start Command**:
+   ```bash
+   bun run start
+   ```
+   *(or `npm run start`)*
+4. **Environment Variables**:
+   - `GEMINI_API_KEY`: *(Required for AI explanations)* Gemini API key from Google AI Studio.
+   - `PORT`: Automatically assigned by Render (defaults to 3000 if unset).
+   - `TWITCH_CHANNEL`: *(Optional)* Default Twitch channel to join (e.g., `streamhealth`).
+
+---
+
 ## ⚖️ Disclaimer
 
 **Educational simulation, not medical advice.**
+

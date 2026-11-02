@@ -1,14 +1,11 @@
 import 'dotenv/config';
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ChatClient } from '@twurple/chat';
 import { GoogleGenAI } from '@google/genai';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = http.createServer(app);
@@ -16,39 +13,63 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Initialize Gemini SDK with telemetry header
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// Dist static path resolution
+const distDir = path.join(process.cwd(), 'dist');
+const distIndex = path.join(distDir, 'index.html');
+
+// Log Gemini key status cleanly
+let hasLoggedGeminiKeyNotice = false;
+function checkGeminiKey(): boolean {
+  if (!process.env.GEMINI_API_KEY) {
+    if (!hasLoggedGeminiKeyNotice) {
+      console.log('GEMINI_API_KEY is not set. Using fallback explanations.');
+      hasLoggedGeminiKeyNotice = true;
+    }
+    return false;
+  }
+  return true;
+}
+checkGeminiKey();
 
 // WebSocket Server for broadcasting Twitch chat votes and status
 const wss = new WebSocketServer({ server });
 
 function broadcast(data: any) {
-  const payload = JSON.stringify(data);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
-    }
-  });
+  try {
+    const payload = JSON.stringify(data);
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(payload);
+      }
+    });
+  } catch (err) {
+    console.error('Error broadcasting WebSocket message:', err);
+  }
+}
+
+// Twitch Channel Validation
+export function isValidTwitchChannel(name: string): boolean {
+  if (!name || typeof name !== 'string') return false;
+  const clean = name.trim().toLowerCase().replace(/^#/, '');
+  return /^[a-zA-Z0-9_]{3,25}$/.test(clean);
 }
 
 // Twitch Chat State & Client
 let activeChannel = process.env.TWITCH_CHANNEL?.trim().toLowerCase().replace(/^#/, '') || '';
 let chatClient: ChatClient | null = null;
 let isChatConnected = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function connectTwitchChat(channelName: string) {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   const channel = channelName.trim().toLowerCase().replace(/^#/, '');
   activeChannel = channel;
 
   if (!channel) {
-    console.log('No Twitch channel provided. Waiting for configuration.');
     if (chatClient) {
       try {
         await chatClient.quit();
@@ -67,6 +88,25 @@ async function connectTwitchChat(channelName: string) {
     return;
   }
 
+  if (!isValidTwitchChannel(channel)) {
+    if (chatClient) {
+      try {
+        await chatClient.quit();
+      } catch (err) {
+        console.warn('Error quitting chat client:', err);
+      }
+      chatClient = null;
+    }
+    isChatConnected = false;
+    broadcast({
+      type: 'TWITCH_STATUS',
+      channel: channel,
+      connected: false,
+      message: `Invalid Twitch channel "${channel}". Channel names must be 3-25 alphanumeric characters.`,
+    });
+    return;
+  }
+
   // Tear down existing connection if any
   if (chatClient) {
     try {
@@ -79,7 +119,7 @@ async function connectTwitchChat(channelName: string) {
   }
 
   try {
-    console.log(`Connecting to Twitch chat for channel: #${channel}...`);
+    console.log(`Connecting anonymously to Twitch chat for channel: #${channel}...`);
 
     // Twurple anonymous read-only client
     chatClient = new ChatClient({
@@ -97,40 +137,56 @@ async function connectTwitchChat(channelName: string) {
       });
     });
 
-    chatClient.onDisconnect((_manually, reason) => {
+    chatClient.onDisconnect((manually, reason) => {
       isChatConnected = false;
-      console.log(`[Twitch] Disconnected from #${channel}:`, reason);
+      console.log(`[Twitch] Disconnected from #${channel}:`, reason?.message || reason || 'closed');
       broadcast({
         type: 'TWITCH_STATUS',
         channel: channel,
         connected: false,
-        message: `Disconnected: ${reason?.message || 'closed'}`,
+        message: `Disconnected: ${reason?.message || 'closed'}. Reconnecting...`,
       });
+
+      // Auto-reconnect if disconnected unexpectedly
+      if (!manually && activeChannel === channel) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          if (activeChannel === channel && !isChatConnected) {
+            console.log(`[Twitch] Attempting auto-reconnect to #${channel}...`);
+            connectTwitchChat(channel).catch(() => {});
+          }
+        }, 5000);
+      }
     });
 
-    // Parse messages for !1, !2, !3 or !a, !b, !c
+    // Parse messages for !1, !2, !3, !a, !b, !c, 1, 2, 3, !vote N
     chatClient.onMessage((chan, user, message) => {
-      const text = message.trim().toLowerCase();
-      let option: 1 | 2 | 3 | null = null;
+      try {
+        const text = message.trim().toLowerCase();
+        if (text.length > 12) return; // Ignore messages longer than 12 characters
 
-      if (text === '!1' || text === '!a' || text.startsWith('!1 ') || text.startsWith('!a ')) {
-        option = 1;
-      } else if (text === '!2' || text === '!b' || text.startsWith('!2 ') || text.startsWith('!b ')) {
-        option = 2;
-      } else if (text === '!3' || text === '!c' || text.startsWith('!3 ') || text.startsWith('!c ')) {
-        option = 3;
-      }
+        let option: 1 | 2 | 3 | null = null;
+        if (text === '!1' || text === '1' || text === '!vote 1' || text === '!a' || text === 'a') {
+          option = 1;
+        } else if (text === '!2' || text === '2' || text === '!vote 2' || text === '!b' || text === 'b') {
+          option = 2;
+        } else if (text === '!3' || text === '3' || text === '!vote 3' || text === '!c' || text === 'c') {
+          option = 3;
+        }
 
-      if (option !== null) {
-        console.log(`[Twitch Vote] User "${user}" voted Option ${option} in #${chan}`);
-        broadcast({
-          type: 'TWITCH_VOTE',
-          user: user,
-          option: option,
-          rawMessage: message,
-          channel: chan,
-          timestamp: Date.now(),
-        });
+        if (option !== null) {
+          console.log(`[Twitch Vote] User "${user}" voted Option ${option} in #${chan}`);
+          broadcast({
+            type: 'TWITCH_VOTE',
+            user: user,
+            option: option,
+            rawMessage: message,
+            channel: chan,
+            timestamp: Date.now(),
+          });
+        }
+      } catch (err) {
+        console.error('Error handling Twitch message:', err);
       }
     });
 
@@ -149,17 +205,20 @@ async function connectTwitchChat(channelName: string) {
 
 // WebSocket connection lifecycle
 wss.on('connection', (ws) => {
-  // Immediately inform client of current Twitch channel & connection state
-  ws.send(
-    JSON.stringify({
-      type: 'TWITCH_STATUS',
-      channel: activeChannel,
-      connected: isChatConnected,
-      message: activeChannel
-        ? (isChatConnected ? `Connected to #${activeChannel}` : `Connecting to #${activeChannel}...`)
-        : 'No Twitch channel set. Enter a channel name in the UI or set TWITCH_CHANNEL in .env.',
-    })
-  );
+  try {
+    ws.send(
+      JSON.stringify({
+        type: 'TWITCH_STATUS',
+        channel: activeChannel,
+        connected: isChatConnected,
+        message: activeChannel
+          ? (isChatConnected ? `Connected to #${activeChannel}` : `Connecting to #${activeChannel}...`)
+          : 'No Twitch channel set. Enter a channel name in the UI or set TWITCH_CHANNEL.',
+      })
+    );
+  } catch (err) {
+    console.error('Error sending initial WS message:', err);
+  }
 
   ws.on('message', async (data) => {
     try {
@@ -173,29 +232,55 @@ wss.on('connection', (ws) => {
   });
 });
 
-// REST API Routes
-app.get('/api/twitch/status', (_req: Request, res: Response) => {
-  res.json({
-    channel: activeChannel,
-    connected: isChatConnected,
-  });
-});
-
-app.post('/api/twitch/channel', async (req: Request, res: Response): Promise<void> => {
-  const { channel } = req.body;
-  if (typeof channel !== 'string') {
-    res.status(400).json({ error: 'channel must be a string' });
-    return;
+// REST API Route: GET /health
+app.get('/health', (_req: Request, res: Response) => {
+  try {
+    res.json({ status: 'ok' });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Health check failed' });
   }
-  await connectTwitchChat(channel);
-  res.json({
-    channel: activeChannel,
-    connected: isChatConnected,
-  });
 });
 
-// API Route: AI Explain winning outbreak choice in 3 grade-6 sentences
-app.post('/api/ai-explain', async (req: Request, res: Response): Promise<void> => {
+app.get('/api/health', (_req: Request, res: Response) => {
+  try {
+    res.json({ status: 'ok' });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Health check failed' });
+  }
+});
+
+// REST API Route: GET /api/twitch/status
+app.get('/api/twitch/status', (_req: Request, res: Response) => {
+  try {
+    res.json({
+      channel: activeChannel,
+      connected: isChatConnected,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Failed to retrieve Twitch status' });
+  }
+});
+
+// REST API Route: POST /api/twitch/channel
+app.post('/api/twitch/channel', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { channel } = req.body || {};
+    if (typeof channel !== 'string') {
+      res.status(400).json({ error: 'channel must be a string' });
+      return;
+    }
+    await connectTwitchChat(channel);
+    res.json({
+      channel: activeChannel,
+      connected: isChatConnected,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Failed to set Twitch channel' });
+  }
+});
+
+// Handler for AI explanation
+async function handleExplain(req: Request, res: Response, _next: NextFunction): Promise<void> {
   try {
     const {
       scenarioTitle,
@@ -205,60 +290,105 @@ app.post('/api/ai-explain', async (req: Request, res: Response): Promise<void> =
       isOptimal,
       infectionEffect,
       prewrittenExplanation,
-    } = req.body;
+      scenario,
+      winningOption,
+      fallbackExplanation,
+    } = req.body || {};
 
-    if (!scenarioTitle || !winningOptionText) {
-      res.status(400).json({ error: 'Missing required scenario details' });
+    const effectiveTitle = scenarioTitle || scenario?.title || 'Outbreak Incident';
+    const effectivePathogen = pathogen || scenario?.pathogen || 'Infectious Pathogen';
+    const effectiveSetting = scenarioSetting || scenario?.setting || 'Community';
+    const effectiveOptionText = winningOptionText || winningOption?.text || 'Intervention Strategy';
+    const effectiveIsOptimal = isOptimal !== undefined ? Boolean(isOptimal) : Boolean(winningOption?.isOptimal);
+    const effectiveEffect = infectionEffect || winningOption?.infectionEffectLabel || '';
+    const fallbackText =
+      prewrittenExplanation ||
+      winningOption?.oneSentenceExplanation ||
+      fallbackExplanation ||
+      'Standard public health containment and contact tracing measures applied.';
+
+    if (!checkGeminiKey()) {
+      res.json({
+        explanation: fallbackText,
+        source: 'fallback',
+      });
       return;
     }
 
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(503).json({ error: 'GEMINI_API_KEY is not configured on server' });
-      return;
-    }
+    // Call Gemini with strict 4-second timeout
+    const aiPromise = (async () => {
+      const prompt = `You are a friendly, expert public health teacher explaining an epidemic outbreak decision to a 6th-grade student (about 11 to 12 years old).
 
-    const prompt = `You are a friendly, expert public health teacher explaining an epidemic outbreak decision to a 6th-grade student (about 11 to 12 years old).
-
-Outbreak Scenario: ${scenarioTitle} (${pathogen || 'Outbreak'})
-Setting: ${scenarioSetting || 'Community'}
-Incident Command Action: "${winningOptionText}"
-Resulting Impact: ${infectionEffect || 'changed'} infections (${isOptimal ? 'helped reduce the outbreak' : 'hurt and caused cases to surge'})
-Key Epidemiological Context: ${prewrittenExplanation || ''}
+Outbreak Scenario: ${effectiveTitle} (${effectivePathogen})
+Setting: ${effectiveSetting}
+Incident Command Action: "${effectiveOptionText}"
+Resulting Impact: ${effectiveEffect} (${effectiveIsOptimal ? 'helped reduce the outbreak' : 'hurt and caused cases to surge'})
+Key Epidemiological Context: ${fallbackText}
 
 Task:
-Write a clear, memorable 3-sentence explanation in plain 6th-grade language of why this winning choice ${isOptimal ? 'helped stop the outbreak' : 'hurt and made the outbreak worse'}.
+Write a clear, memorable 3-sentence explanation in plain 6th-grade language of why this winning choice ${effectiveIsOptimal ? 'helped stop the outbreak' : 'hurt and made the outbreak worse'}.
 Constraints:
 - Exactly 3 sentences.
 - Grade-6 reading level.
 - Highly engaging and easy to understand for young students and livestream viewers.
 - No medical jargon without explaining it.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-    });
+      const ai = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY!,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
 
-    const explanation = response.text?.trim();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+      });
 
-    if (!explanation) {
-      res.status(500).json({ error: 'Empty response generated by model' });
-      return;
+      return response.text?.trim() || null;
+    })();
+
+    const timeoutPromise = new Promise<null>((resolve) =>
+      setTimeout(() => resolve(null), 4000)
+    );
+
+    const result = await Promise.race([aiPromise, timeoutPromise]);
+
+    if (result) {
+      res.json({
+        explanation: result,
+        source: 'ai',
+      });
+    } else {
+      res.json({
+        explanation: fallbackText,
+        source: 'fallback',
+      });
     }
-
-    res.json({ explanation });
-  } catch (error: any) {
-    console.error('Error generating AI explanation with Gemini:', error);
-    res.status(500).json({
-      error: error?.message || 'Failed to generate AI explanation',
+  } catch (error) {
+    const fallbackText =
+      req.body?.prewrittenExplanation ||
+      req.body?.winningOption?.oneSentenceExplanation ||
+      req.body?.fallbackExplanation ||
+      'Standard public health containment and contact tracing measures applied.';
+    res.json({
+      explanation: fallbackText,
+      source: 'fallback',
     });
   }
-});
+}
+
+// REST API Route: POST /api/explain & POST /api/ai-explain
+app.post('/api/explain', handleExplain);
+app.post('/api/ai-explain', handleExplain);
 
 // Mount Vite in dev mode or serve static files in production
 async function startServer() {
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isProduction = process.env.NODE_ENV === 'production' || !!process.env.RENDER;
 
-  if (!isProduction) {
+  if (!isProduction && !fs.existsSync(distIndex)) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true, port: Number(PORT), host: '0.0.0.0' },
@@ -266,11 +396,28 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
+    app.use(express.static(distDir));
   }
+
+  // Catch-all route returning dist/index.html for any non-/api route
+  app.get('*', (req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api')) {
+      return next();
+    }
+    if (fs.existsSync(distIndex)) {
+      res.sendFile(distIndex);
+    } else {
+      res.status(503).send('Frontend not built. Run npm run build');
+    }
+  });
+
+  // Global Express Error Handler
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('[Global Error Handler]', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error', message: err?.message || 'Unknown error' });
+    }
+  });
 
   // Connect to default Twitch channel if configured in env
   if (activeChannel) {
@@ -280,8 +427,11 @@ async function startServer() {
   }
 
   server.listen(Number(PORT), '0.0.0.0', () => {
-    console.log(`StreamHealth Live server with WebSocket & Twurple running on http://0.0.0.0:${PORT}`);
+    console.log(`StreamHealth Live server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal error starting server:', err);
+  process.exit(1);
+});
